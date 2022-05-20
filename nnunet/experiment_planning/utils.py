@@ -49,7 +49,8 @@ def split_4d(input_folder, num_processes=default_num_threads, overwrite_task_out
         overwrite_task_output_id = input_task_id
 
     task_name = full_task_name[7:]
-
+    print('raw_name', nnUNet_raw_data)
+    print('task_name', task_name)
     output_folder = join(nnUNet_raw_data, "Task%03.0d_" % overwrite_task_output_id + task_name)
 
     if isdir(output_folder):

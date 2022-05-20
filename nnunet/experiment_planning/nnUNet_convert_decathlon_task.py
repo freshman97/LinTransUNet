@@ -56,7 +56,8 @@ def main():
     args = parser.parse_args()
 
     crawl_and_remove_hidden_from_decathlon(args.i)
-
+    print(args.i)
+    print(args.p)
     split_4d(args.i, args.p, args.output_task_id)
 
 
