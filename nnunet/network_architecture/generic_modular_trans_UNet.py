@@ -13,12 +13,14 @@
 #    limitations under the License.
 
 
+from turtle import forward
 import numpy as np
 import torch
 from nnunet.network_architecture.custom_modules.conv_blocks import BasicResidualBlock, ResidualLayer
 from nnunet.network_architecture.generic_UNet import Upsample
 from nnunet.network_architecture.generic_modular_UNet import PlainConvUNetDecoder, get_default_network_config
 from nnunet.network_architecture.neural_network import SegmentationNetwork
+from nnunet.network_architecture.trans_block import SpatialAttention3DBlock, SelfAttention3DBlock
 from nnunet.training.loss_functions.dice_loss import DC_and_CE_loss
 from torch import nn
 from torch.optim import SGD
@@ -257,6 +259,115 @@ class ResidualUNetDecoder(nn.Module):
             print(p, num_feat, num_convs, current_shape)
             tmp += num_convs * np.prod(current_shape) * num_feat
 
+        return tmp * batch_size
+
+
+class LinSkipTransDecoder(nn.Module):
+    def __init__(self, input_channels, base_num_features, num_blocks_per_stage, feat_map_mul_on_downscale,
+                 pool_op_kernel_sizes, conv_kernel_sizes, spatial_or_self_attention, props, base_num_dims, 
+                 default_return_skips=True, max_num_features=480, max_num_dims=8):
+        """
+        Following UNet building blocks can be added by utilizing the properties this class exposes (TODO)
+
+        this one includes the bottleneck layer!
+
+        :param input_channels:
+        :param base_num_features:
+        :param num_blocks_per_stage:
+        :param feat_map_mul_on_downscale:
+        :param pool_op_kernel_sizes:
+        :param conv_kernel_sizes:
+        :param spatial_or_self_attention
+        :param props:
+        """
+        super(LinSkipTransDecoder, self).__init__()
+
+        self.default_return_skips = default_return_skips
+        self.props = props
+
+        self.stages = []
+        self.stage_output_features = []
+        self.stage_block_numbers = []
+        self.stage_dim_features = []
+
+        assert len(pool_op_kernel_sizes) == len(conv_kernel_sizes)
+
+        num_stages = len(conv_kernel_sizes)
+
+        if not isinstance(num_blocks_per_stage, (list, tuple)):
+            num_blocks_per_stage = [num_blocks_per_stage] * num_stages
+        else:
+            assert len(num_blocks_per_stage) == num_stages
+
+        self.num_blocks_per_stage = num_blocks_per_stage  # decoder may need this
+
+        self.initial_conv = props['conv_op'](input_channels, base_num_features, 3, padding=1, **props['conv_op_kwargs'])
+        self.initial_norm = props['norm_op'](base_num_features, **props['norm_op_kwargs'])
+        self.initial_nonlin = props['nonlin'](**props['nonlin_kwargs'])
+
+        for stage in range(num_stages):
+            expand_ratio = feat_map_mul_on_downscale ** stage
+            current_output_features = min(base_num_features * expand_ratio, max_num_features)
+            next_output_features = min(base_num_features * expand_ratio *feat_map_mul_on_downscale, max_num_features)
+            
+            current_output_dim = min(base_num_dims * expand_ratio, max_num_dims)
+
+            if spatial_or_self_attention[stage]:
+                current_stage = SelfAttention3DBlock(in_dim=current_output_features, d_model=current_output_features,
+                                                     nhead=expand_ratio, N=current_output_dim)
+            else:
+                current_stage = SpatialAttention3DBlock(in_channel1=current_output_features, in_channel2=next_output_features, 
+                                                        inter_channel=current_output_features)
+
+            self.stages.append(current_stage)
+            self.stage_output_features.append(current_output_features)
+            self.stage_block_numbers.append(current_output_dim)
+            self.stage_dim_features.append(current_output_features)
+
+        self.stages = nn.ModuleList(self.stages)
+
+    def forward(self, x, return_skips=None):
+        """
+
+        :param x:
+        :param return_skips: if none then self.default_return_skips is used
+        :return:
+        """
+        skips = []
+
+        x = self.initial_nonlin(self.initial_norm(self.initial_conv(x)))
+        for s in self.stages:
+            x = s(x)
+            if self.default_return_skips:
+                skips.append(x)
+
+        if return_skips is None:
+            return_skips = self.default_return_skips
+
+        if return_skips:
+            return skips
+        else:
+            return x
+
+    @staticmethod
+    def compute_approx_vram_consumption(patch_size, base_num_features, max_num_features,
+                                        num_modalities, pool_op_kernel_sizes, num_conv_per_stage_encoder,
+                                        feat_map_mul_on_downscale, batch_size):
+        npool = len(pool_op_kernel_sizes) - 1
+
+        current_shape = np.array(patch_size)
+
+        tmp = (num_conv_per_stage_encoder[0] * 2 + 1) * np.prod(current_shape) * base_num_features \
+              + num_modalities * np.prod(current_shape)
+
+        num_feat = base_num_features
+
+        for p in range(1, npool + 1):
+            current_shape = current_shape / np.array(pool_op_kernel_sizes[p])
+            num_feat = min(num_feat * feat_map_mul_on_downscale, max_num_features)
+            num_convs = num_conv_per_stage_encoder[p] * 2 + 1  # + 1 for conv in skip in first block
+            print(p, num_feat, num_convs, current_shape)
+            tmp += num_convs * np.prod(current_shape) * num_feat
         return tmp * batch_size
 
 
